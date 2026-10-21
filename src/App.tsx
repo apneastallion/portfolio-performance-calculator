@@ -643,10 +643,23 @@ export default function App() {
                 onChange={(e) => setRebalance(e.target.value as Rebalance)}
               >
                 <option value="annual">Annual</option>
+                <option value="band">Drift bands (±5pp)</option>
                 <option value="none">Buy &amp; hold</option>
               </select>
               {weightMode === "equal" && (
                 <span className="hint tight">Equal weight rebalances automatically.</span>
+              )}
+              {weightMode === "custom" && rebalance === "annual" && (
+                <span className="hint tight">
+                  On each anniversary the winners above target are sold and the money is
+                  spread over the holdings below it.
+                </span>
+              )}
+              {weightMode === "custom" && rebalance === "band" && (
+                <span className="hint tight">
+                  As soon as a holding drifts 5 points from its target, the excess is sold
+                  and redistributed to the others.
+                </span>
               )}
             </div>
             <div>

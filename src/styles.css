@@ -444,6 +444,22 @@ button {
   color: var(--neg);
 }
 
+/* rebalance legs: money leaving the winner, money arriving in the laggards.
+   They wrap instead of forcing the five-column table into a horizontal scroll. */
+.sell,
+.buy {
+  font-variant-numeric: tabular-nums;
+  white-space: normal;
+}
+
+.sell {
+  color: var(--neg);
+}
+
+.buy {
+  color: var(--pos);
+}
+
 .card-head {
   display: flex;
   align-items: center;

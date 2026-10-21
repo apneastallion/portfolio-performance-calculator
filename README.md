@@ -11,15 +11,18 @@ Live app: <https://portfolio-performance-calculator.pages.dev>
 - **Portfolio** — add any number of tickers (stocks, ETFs, or `SPY` as an S&P 500 proxy).
   Unknown symbols are fetched on demand; nothing is hard-coded.
 - **Weights** — either **equal weight** (the mix is reset to equal every year) or **set
-  percentages** per ticker, restored on each anniversary (or left to drift, under buy &
-  hold). Editing one percentage moves the others so the total stays at 100%; a ticker can
-  be **locked** to hold its weight while the unlocked ones absorb the change. A new ticker
-  takes an equal share from the unlocked holdings; removing one hands its slice to them.
+  percentages** per ticker. Rebalancing is **annual**, **drift bands** (trade as soon as a
+  holding is 5 points off target) or **buy & hold** (let it drift). Editing one percentage
+  moves the others so the total stays at 100%; a ticker can be **locked** to hold its
+  weight while the unlocked ones absorb the change. A new ticker takes an equal share from
+  the unlocked holdings; removing one hands its slice to them.
 - **Cash flows** — a starting balance plus a signed monthly amount: positive deposits,
   negative withdrawals. Applied on the first trading session of each month.
 - **Dates** — 1Y / 3Y / 5Y / 10Y / 20Y / Max presets, or any custom range.
 - **Output** — balance chart against the S&P 500 and cumulative deposits, six summary
-  cards, calendar-year returns with end-of-year balances, and per-holding final weights.
+  cards, calendar-year returns with end-of-year balances, per-holding final weights, and a
+  rebalancing log (date, what was sold, what was bought, cost) so a trimmed winner is
+  visible rather than asserted.
 - **Ragged histories** — a portfolio is not held back by its youngest fund. The run starts
   with the earliest holding and each later ticker is bought when its price history begins,
   so a 2024 ETF can join a book that has been running since 2000.
@@ -127,9 +130,13 @@ backtest actually suffered is shown alongside for context.
 - Trades execute at the adjusted close; the fee is paid *out of* each deposit, so a
   $3,000 contribution buys $2,997.00 of ETF at 10 bp.
 - Weights are either equal (always rebalanced annually) or the percentages you set;
-  rebalancing is then either **annual** (back to target on each anniversary) or **buy &
-  hold** (never trade again). Monthly deposits are always split at target weights.
-  Withdrawals are pro-rated across holdings.
+  rebalancing is then **annual** (back to target on each anniversary), **drift bands**
+  (trade as soon as a holding is 5 percentage points off target, so a runaway winner is
+  trimmed and the proceeds buy the laggards) or **buy & hold** (never trade again).
+  Either way the overweight sleeve is sold down and the money is redistributed, never
+  left in cash; the cost is charged on both legs. The Rebalancing table lists each trade,
+  what was sold, what was bought and what it cost. Monthly deposits are always split at
+  target weights. Withdrawals are pro-rated across holdings.
 - Deposits are invested immediately; idle cash earns nothing. Sharpe uses a 0% risk-free
   rate and is labelled accordingly.
 - Expense ratios are already inside ETF prices and are not charged twice.

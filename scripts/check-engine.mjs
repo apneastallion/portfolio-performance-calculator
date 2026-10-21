@@ -81,6 +81,33 @@ checks.push(["70% sleeve after annual rebalance", rebalanced.finalWeights.AAA, 0
 checks.push(["30% sleeve after annual rebalance", rebalanced.finalWeights.BBB, 0.3, 1e-9]);
 checks.push(["buy & hold lets 70/30 drift", drifted.finalWeights.AAA, 1.4 / 1.7, 1e-9]);
 
+// --- the winner is actually trimmed: AAA doubles mid-year, so 70/30 drifts to 82/18.
+// Annual catches it on the next anniversary; bands catch it on the day it crosses 5pp.
+const banded = runW("band");
+const bandFirst = banded.rebalances[0];
+const annualFirst = rebalanced.rebalances[0];
+const jumpDate = dts[doubled];
+const anniversaryDate = dts[doubled + 1];
+// 70% of 10,000 doubles to 14,000 while the other sleeve stays at 3,000: 82.35/17.65.
+// Restoring 70/30 on 17,000 means selling 14,000 - 0.7 * 17,000 = 2,100 of AAA.
+checks.push(["band rebalance fires when the jump happens", bandFirst?.date === jumpDate ? 1 : 0, 1, 0]);
+checks.push(["annual waits for the anniversary", annualFirst?.date === anniversaryDate ? 1 : 0, 1, 0]);
+checks.push(["band trims the winner back to target", bandFirst?.after.AAA ?? -1, 0.7, 1e-9]);
+checks.push(["band sold the overweight sleeve", bandFirst?.trades.find((t) => t.symbol === "AAA")?.delta ?? 0, -2100, 1e-6]);
+checks.push(["band bought the laggard", bandFirst?.trades.find((t) => t.symbol === "BBB")?.delta ?? 0, 2100, 1e-6]);
+checks.push(["band run ends on target", banded.finalWeights.AAA, 0.7, 1e-9]);
+// a rebalance is internal: at zero cost it moves money between sleeves, never out
+checks.push(["band keeps the money in the account", banded.equity[banded.equity.length - 1], drifted.equity[drifted.equity.length - 1], 1e-9]);
+checks.push(["buy & hold records no rebalances", drifted.rebalances.length, 0, 0]);
+// flat prices never drift, so the band policy stays put
+const calmPanel = { dates: dts, prices: { AAA: dts.map(() => 100), BBB: dts.map(() => 100) } };
+checks.push([
+  "band does nothing without drift",
+  runPortfolio({ panel: calmPanel, symbols: ["AAA", "BBB"], weights: [0.7, 0.3], initial: 10000, monthly: 0, costBps: 10, rebalance: "band" }).rebalances.length,
+  0,
+  0,
+]);
+
 let rejected = false;
 try {
   runPortfolio({

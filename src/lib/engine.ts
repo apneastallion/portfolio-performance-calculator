@@ -12,7 +12,33 @@
  *   - MWR: what the investor's dollars earned (XIRR), which depends on timing.
  */
 
-export type Rebalance = "none" | "annual";
+/**
+ * `annual` restores the targets on each anniversary of the window's first session.
+ * `band` trades whenever a holding drifts more than BAND away from its target, so a
+ * runaway winner is trimmed and the proceeds spread over the laggards within days
+ * rather than up to a year later. `none` is buy & hold.
+ */
+export type Rebalance = "none" | "annual" | "band";
+
+/** Drift that triggers a `band` rebalance, in weight terms (5 percentage points). */
+export const BAND = 0.05;
+
+/**
+ * One executed rebalance, kept so the UI can show the winner actually being trimmed
+ * instead of merely asserting that the maths happened.
+ */
+export interface RebalanceEvent {
+  date: string;
+  reason: "annual" | "band";
+  /** total |traded notional|, i.e. sells + buys */
+  turnover: number;
+  cost: number;
+  /** weights immediately before and after the trades, over the live symbols */
+  before: Record<string, number>;
+  after: Record<string, number>;
+  /** signed dollars per symbol: negative is sold, positive is bought */
+  trades: { symbol: string; delta: number }[];
+}
 
 export interface Panel {
   /** ISO dates, ascending: the union of every symbol's sessions in the window. */
@@ -43,6 +69,7 @@ export interface Run {
   units: Record<string, number>;
   finalWeights: Record<string, number>;
   depletedAt?: string;
+  rebalances: RebalanceEvent[];
 }
 
 const DAY = 86_400_000;
@@ -154,6 +181,7 @@ export function runPortfolio(input: RunInput): Run {
 
   const contrib = new Set(monthlyDates(panel.dates));
   const rebal = new Set(rebalance === "annual" ? rebalanceIndexes(panel.dates) : []);
+  const rebalances: RebalanceEvent[] = [];
   let depletedAt: string | undefined;
 
   const valueAt = (i: number) =>
@@ -162,6 +190,67 @@ export function runPortfolio(input: RunInput): Run {
       const p = priceAt(k, i);
       return p == null ? sum : sum + units[s] * p;
     }, 0);
+
+  /**
+   * Sell every holding above its target and spend the proceeds on the ones below it,
+   * charging the fee on both sides. The total is shrunk by exactly the round-trip cost,
+   * so the fee lands on the account as a whole rather than on whichever leg happens to
+   * be applied first.
+   */
+  const rebalanceNow = (i: number, reason: RebalanceEvent["reason"]) => {
+    if (totalUnits <= 0) return;
+    const mix = mixAt(i);
+    if (!mix.length) return;
+    const values = mix.map(({ k }) => units[symbols[k]] * (priceAt(k, i) as number));
+    const total = values.reduce((a, b) => a + b, 0);
+    if (total <= 0) return;
+    // solve the scale that leaves enough behind to pay for the trades it causes
+    let scale = total;
+    for (let it = 0; it < 60; it += 1) {
+      const traded = mix.reduce((acc, { w }, j) => acc + Math.abs(w * scale - values[j]), 0);
+      const next = total - traded * cost;
+      if (Math.abs(next - scale) < 1e-10) {
+        scale = next;
+        break;
+      }
+      scale = next;
+    }
+
+    const before: Record<string, number> = {};
+    const after: Record<string, number> = {};
+    const trades: { symbol: string; delta: number }[] = [];
+    let turnover = 0;
+    mix.forEach(({ k, w }, j) => {
+      before[symbols[k]] = values[j] / total;
+      after[symbols[k]] = w;
+      const delta = w * scale - values[j];
+      if (Math.abs(delta) < 1e-9) return;
+      units[symbols[k]] += delta / (priceAt(k, i) as number);
+      totalCost += Math.abs(delta) * cost;
+      turnover += Math.abs(delta);
+      trades.push({ symbol: symbols[k], delta });
+    });
+    if (!trades.length) return;
+    rebalances.push({
+      date: panel.dates[i],
+      reason,
+      turnover,
+      cost: turnover * cost,
+      before,
+      after,
+      trades,
+    });
+  };
+
+  /** Has any holding drifted more than BAND from its target weight? */
+  const driftExceeded = (i: number): boolean => {
+    const v = valueAt(i);
+    if (v <= 1e-9) return false;
+    return mixAt(i).some(({ k, w }) => {
+      const held = units[symbols[k]] * (priceAt(k, i) as number);
+      return Math.abs(held / v - w) > BAND + 1e-12;
+    });
+  };
 
   for (let i = 0; i < n; i += 1) {
     let flow = 0;
@@ -215,31 +304,10 @@ export function runPortfolio(input: RunInput): Run {
       }
     }
 
-    if (rebal.has(i) && totalUnits > 0) {
-      const mix = mixAt(i);
-      if (mix.length) {
-        const values = mix.map(({ k }) => units[symbols[k]] * (priceAt(k, i) as number));
-        const total = values.reduce((a, b) => a + b, 0);
-        // solve the scale that leaves enough behind to pay for the trades it causes
-        let scale = total;
-        for (let it = 0; it < 60; it += 1) {
-          const traded = mix.reduce(
-            (acc, { w }, j) => acc + Math.abs(w * scale - values[j]),
-            0,
-          );
-          const next = total - traded * cost;
-          if (Math.abs(next - scale) < 1e-10) {
-            scale = next;
-            break;
-          }
-          scale = next;
-        }
-        mix.forEach(({ k, w }, j) => {
-          const delta = w * scale - values[j];
-          units[symbols[k]] += delta / (priceAt(k, i) as number);
-          totalCost += Math.abs(delta) * cost;
-        });
-      }
+    if (rebal.has(i)) {
+      rebalanceNow(i, "annual");
+    } else if (rebalance === "band" && driftExceeded(i)) {
+      rebalanceNow(i, "band");
     }
 
     const v = valueAt(i);
@@ -257,7 +325,7 @@ export function runPortfolio(input: RunInput): Run {
     finalWeights[s] = p != null && totalEnd > 0 ? (units[s] * p) / totalEnd : 0;
   });
 
-  return { equity, nav, flows, costs, units, finalWeights, depletedAt };
+  return { equity, nav, flows, costs, units, finalWeights, depletedAt, rebalances };
 }
 
 // ------------------------------------------------------------------ statistics

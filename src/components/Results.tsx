@@ -76,6 +76,12 @@ export function Results({
 
   const beat = summary.finalValue - bench.summary.finalValue;
 
+  // newest first: the last few are what tell you whether the winner was actually trimmed
+  const rebalances = run.rebalances;
+  const latestRebalances = rebalances.slice(-12).reverse();
+  const rebalanceTurnover = rebalances.reduce((s, r) => s + r.turnover, 0);
+  const rebalanceCost = rebalances.reduce((s, r) => s + r.cost, 0);
+
   const sourceSummary = useMemo(() => {
     const counts: Record<string, number> = {};
     Object.values(sources).forEach((s) => {
@@ -252,6 +258,65 @@ export function Results({
           (risk-free assumed 0).
         </p>
       </div>
+
+      {rebalances.length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <h2>Rebalancing</h2>
+            <span className="muted">
+              {rebalances.length} rebalance{rebalances.length === 1 ? "" : "s"} ·{" "}
+              {money(rebalanceTurnover)} turned over · {money(rebalanceCost)} in costs
+            </span>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Why</th>
+                  <th>Sold</th>
+                  <th>Bought</th>
+                  <th className="num">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {latestRebalances.map((ev) => {
+                  const sold = ev.trades
+                    .filter((t) => t.delta < -1e-6)
+                    .sort((a, b) => a.delta - b.delta);
+                  const bought = ev.trades
+                    .filter((t) => t.delta > 1e-6)
+                    .sort((a, b) => b.delta - a.delta);
+                  return (
+                    <tr key={`${ev.date}-${ev.reason}`}>
+                      <td>{shortDate(ev.date)}</td>
+                      <td>{ev.reason === "annual" ? "Annual" : "5pp drift"}</td>
+                      <td className="sell">
+                        {sold.length
+                          ? sold.map((t) => `${t.symbol} ${money(-t.delta)}`).join(" · ")
+                          : "—"}
+                      </td>
+                      <td className="buy">
+                        {bought.length
+                          ? bought.map((t) => `${t.symbol} ${money(t.delta)}`).join(" · ")
+                          : "—"}
+                      </td>
+                      <td className="num">{money(ev.cost)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="footnote">
+            {rebalances.length > latestRebalances.length
+              ? `Latest ${latestRebalances.length} of ${rebalances.length}. `
+              : ""}
+            Whatever sits above its target is sold down and the proceeds buy the holdings
+            below target, with the trading cost charged on both legs.
+          </p>
+        </div>
+      )}
 
       <Projection summary={summary} monthly={monthly} />
     </div>
