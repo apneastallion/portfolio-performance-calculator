@@ -645,7 +645,7 @@ export default function App() {
                 onChange={(e) => setRebalance(e.target.value as Rebalance)}
               >
                 <option value="annual">Annual</option>
-                <option value="band">Drift bands (±5pp)</option>
+                <option value="band">5pp bands</option>
                 <option value="none">Buy &amp; hold</option>
               </select>
               {weightMode === "equal" && (
