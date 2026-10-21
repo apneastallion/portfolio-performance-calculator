@@ -151,6 +151,12 @@ Deploy (requires `wrangler login` once):
 npm run deploy
 ```
 
+That is a direct upload of `dist/`. The project is also connected to GitHub, so a push to
+`main` builds and publishes on its own. The Git build reads `wrangler.toml` for
+`pages_build_output_dir = "./dist"`, and the **build command** (`npm run build`) is a
+project setting — Wrangler's Pages schema has no `build` section, so leaving that field
+empty makes Pages skip the build and look for a `dist/` that a fresh clone does not have.
+
 ### Engine verification
 
 `npm run check:engine` runs the TypeScript engine against the reference results from the

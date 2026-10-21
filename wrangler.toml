@@ -1,11 +1,9 @@
-# Cloudflare Pages project settings — the source of truth for the Git-integrated build.
-# Without these two keys the integration published the repository root, which served the
-# uncompiled source index.html (it imports /src/main.tsx) and rendered a blank page.
-# `dist/` is gitignored, so the build command has to regenerate it on every deploy:
-# Vite writes the SPA, then scripts/build-worker.mjs writes dist/_worker.js.
+# Cloudflare Pages project settings — read by the Git-integrated build.
+# Keep the output directory here rather than in the dashboard: with an empty value Pages
+# published the repository root and served the uncompiled index.html (a blank page).
+# Wrangler's Pages schema rejects a `build` section, so the build command lives in the
+# project settings instead (see "Deploy" in README.md) — it has to regenerate `dist/`,
+# which is gitignored.
 name = "portfolio-performance-calculator"
 pages_build_output_dir = "./dist"
 compatibility_date = "2026-10-21"
-
-[build]
-command = "npm run build"
