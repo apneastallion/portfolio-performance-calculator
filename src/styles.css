@@ -529,23 +529,6 @@ button {
   -webkit-overflow-scrolling: touch;
 }
 
-/* fit all four yearly columns on a phone instead of clipping the last one */
-@media (max-width: 640px) {
-  th,
-  td {
-    padding: 8px 6px;
-  }
-  table {
-    font-size: 13px;
-  }
-  th {
-    font-size: 10.5px;
-    letter-spacing: 0.02em;
-  }
-  .tag {
-    display: none;
-  }
-}
 
 table {
   width: 100%;
@@ -630,4 +613,26 @@ tfoot td {
   border-radius: 10px;
   padding: 10px 12px;
   font-size: 13px;
+}
+
+/* ------------------------------------------------------------------ phone */
+/* Must come last: these override the base table and tag rules above. */
+@media (max-width: 640px) {
+  th,
+  td {
+    padding: 8px 5px;
+  }
+  table {
+    font-size: 12px;
+  }
+  th {
+    font-size: 9.5px;
+    letter-spacing: 0;
+  }
+  .tag {
+    display: none;
+  }
+  .stat-value {
+    font-size: 22px;
+  }
 }
