@@ -1,0 +1,7 @@
+# Cloudflare Pages project settings — the source of truth for the Git-integrated build.
+# The dashboard had an empty build output directory, which published the repo root and
+# served the uncompiled index.html (hence a blank page). Build output lives in dist/,
+# where Vite writes the SPA and scripts/build-worker.mjs writes _worker.js.
+name = "portfolio-performance-calculator"
+pages_build_output_dir = "./dist"
+compatibility_date = "2026-10-21"
