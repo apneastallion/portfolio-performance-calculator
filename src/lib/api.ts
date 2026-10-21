@@ -70,17 +70,26 @@ export async function loadPrices(
   const errors: string[] = [];
   const sources: Record<string, string> = {};
 
-  for (let i = 0; i < symbols.length; i += 1) {
-    const sym = symbols[i];
-    onProgress?.(i, symbols.length, sym);
-    const got = await fetchSymbol(sym, start, end);
-    if (got && got.dates.length > 1) {
-      series.push(got);
-      sources[sym] = got.source;
-    } else {
-      errors.push(sym);
+  // A cold symbol costs a full-history round trip, so fetch a few at a time rather
+  // than one after another; the progress bar still advances per completed symbol.
+  const queue = [...symbols];
+  let done = 0;
+  const worker = async () => {
+    for (let sym = queue.shift(); sym; sym = queue.shift()) {
+      const got = await fetchSymbol(sym, start, end);
+      done += 1;
+      onProgress?.(done, symbols.length, sym);
+      if (got && got.dates.length > 1) {
+        series.push(got);
+        sources[sym] = got.source;
+      } else {
+        errors.push(sym);
+      }
     }
-  }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(4, symbols.length) }, worker),
+  );
   onProgress?.(symbols.length, symbols.length, "");
 
   if (!series.length) return { panel: { dates: [], prices: {} }, sources, errors };

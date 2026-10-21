@@ -96,7 +96,7 @@ export default function App() {
     try {
       loaded = await loadPrices(symbols, start, end, (done, total, sym) => {
         setProgress(6 + (done / total) * 74);
-        setStage(sym ? `Fetching ${sym} (${done + 1}/${total})` : "Aligning trading calendars…");
+        setStage(sym ? `Fetched ${sym} (${done}/${total})` : "Aligning trading calendars…");
       });
     } catch (e) {
       setBusy(false);
@@ -149,6 +149,11 @@ export default function App() {
         bench: { run: benchRun, summary: benchSummary },
         sources: loaded.sources,
       });
+      // drop tickers that returned nothing so the chip list, the "equal weight across N"
+      // label and the holdings table all describe the same portfolio
+      if (loaded.errors.length) {
+        setHoldings((prev) => prev.filter((h) => !loaded.errors.includes(h.symbol)));
+      }
       setFailed(loaded.errors);
       setProgress(100);
       setStage("Done");
