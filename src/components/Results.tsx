@@ -62,6 +62,16 @@ export function Results({ dates, run, summary, bench, yearly, holdings, sources 
 
   const beat = summary.finalValue - bench.summary.finalValue;
 
+  const sourceSummary = useMemo(() => {
+    const counts: Record<string, number> = {};
+    Object.values(sources).forEach((s) => {
+      counts[s] = (counts[s] ?? 0) + 1;
+    });
+    return Object.entries(counts)
+      .map(([name, n]) => `${n} via ${name}`)
+      .join(" · ");
+  }, [sources]);
+
   const downloadCsv = () => {
     const rows = [
       ["year", "time_weighted_return", "deposited", "end_balance", "partial_year"].join(","),
@@ -136,11 +146,7 @@ export function Results({ dates, run, summary, bench, yearly, holdings, sources 
       <div className="card">
         <div className="card-head">
           <h2>Balance over time</h2>
-          <span className="muted">
-            {Object.entries(sources)
-              .map(([s, v]) => `${s} via ${v}`)
-              .join(" · ")}
-          </span>
+          <span className="muted">prices: {sourceSummary}</span>
         </div>
         <Chart dates={dates} series={chartSeries} />
       </div>
