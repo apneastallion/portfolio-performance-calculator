@@ -20,7 +20,26 @@ interface Series {
   close: number[];
   source: "yahoo" | "stooq";
   adjusted: boolean;
+  /** upstream ticker actually used, e.g. BTC -> BTC-USD */
+  resolved?: string;
 }
+
+/**
+ * Yahoo has no bare crypto tickers: the coin lives at `<SYM>-USD`. Worse, several bare
+ * codes now belong to *funds* — "BTC" and "ETH" are the 2024 Grayscale mini trusts — so
+ * asking for BTC quietly returned three years of a closed-end fund instead of bitcoin's
+ * full history. These majors therefore resolve to their USD pair.
+ *
+ * Tickers that are also prominent U.S. listings (TRX, APT, SUI, SAND, STX, AXS) are left
+ * alone; any coin can always be requested explicitly as `<SYM>-USD`.
+ */
+const CRYPTO = new Set([
+  "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LTC", "BCH", "DOT", "AVAX",
+  "MATIC", "SHIB", "XLM", "ATOM", "UNI", "LINK", "AAVE", "NEAR", "ARB", "OP",
+  "ICP", "FIL", "ETC", "HBAR", "ALGO", "VET", "INJ", "GRT", "MANA", "XTZ",
+  "EOS", "THETA", "RUNE", "KAS", "PEPE", "WIF", "BONK", "JUP", "SEI", "TIA",
+  "ONDO", "ENA", "TON", "IMX",
+]);
 
 const HOUR = 3_600_000;
 const TTL = 12 * HOUR;
@@ -68,7 +87,7 @@ async function yahooSymbol(symbol: string): Promise<Series | null> {
       close.push(v);
     }
     if (dates.length < 2) return null;
-    return { symbol, dates, close, source: "yahoo", adjusted: true };
+    return { symbol, dates, close, source: "yahoo", adjusted: true, resolved: symbol };
   } catch {
     return null;
   }
@@ -76,10 +95,15 @@ async function yahooSymbol(symbol: string): Promise<Series | null> {
 
 /**
  * Yahoo writes share classes with a dash (BRK-B) while index files use a dot
- * (BRK.B), so try both spellings before giving up.
+ * (BRK.B), so try both spellings before giving up. Crypto majors are rewritten to
+ * their USD pair, which is what "BTC"/"ETH" are meant to mean in a backtest.
  */
 async function fromYahoo(symbol: string): Promise<Series | null> {
-  const candidates = [...new Set([symbol, symbol.replace(/\./g, "-")])];
+  const pair = CRYPTO.has(symbol) ? `${symbol}-USD` : null;
+  // never fall back to the bare crypto code: that is the fund we are avoiding
+  const candidates = pair
+    ? [pair]
+    : [...new Set([symbol, symbol.replace(/\./g, "-")])];
   for (const candidate of candidates) {
     const hit = await yahooSymbol(candidate);
     if (hit) return { ...hit, symbol };
@@ -89,6 +113,9 @@ async function fromYahoo(symbol: string): Promise<Series | null> {
 
 function stooqSymbol(symbol: string): string {
   const s = symbol.toLowerCase();
+  if (CRYPTO.has(symbol) || /^[A-Z]{2,6}-USD$/.test(symbol)) {
+    return `${symbol.replace(/-USD$/, "").toLowerCase()}usd`;
+  }
   if (s.startsWith("^")) {
     if (s === "^gspc" || s === "^spx") return "^spx";
     if (s === "^ndx") return "^ndx";
@@ -122,7 +149,7 @@ async function fromStooq(symbol: string): Promise<Series | null> {
     if (dates.length < 2) return null;
     // Stooq's CSV close carries dividend adjustments for most US symbols, but it is
     // not documented, so the flag is conservative and the UI labels the source.
-    return { symbol, dates, close, source: "stooq", adjusted: false };
+    return { symbol, dates, close, source: "stooq", adjusted: false, resolved: stooqSymbol(symbol) };
   } catch {
     return null;
   }
@@ -132,7 +159,8 @@ async function loadSeries(symbol: string, ctx: ExecutionContext): Promise<Series
   const hit = mem.get(symbol);
   if (hit && hit.expires > Date.now()) return hit.data;
 
-  const key = `https://ppc-cache.internal/series/v1/${encodeURIComponent(symbol)}`;
+  // v2: crypto aliases changed what these keys resolve to, so v1 entries must not be served
+  const key = `https://ppc-cache.internal/series/v2/${encodeURIComponent(symbol)}`;
   if (typeof caches !== "undefined") {
     try {
       const cached = await caches.default.match(key);

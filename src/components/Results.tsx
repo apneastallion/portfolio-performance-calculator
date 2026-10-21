@@ -18,6 +18,7 @@ interface Props {
   yearly: YearRow[];
   holdings: Holding[];
   sources: Record<string, string>;
+  resolved: Record<string, string>;
 }
 
 function Card({
@@ -40,7 +41,16 @@ function Card({
   );
 }
 
-export function Results({ dates, run, summary, bench, yearly, holdings, sources }: Props) {
+export function Results({
+  dates,
+  run,
+  summary,
+  bench,
+  yearly,
+  holdings,
+  sources,
+  resolved,
+}: Props) {
   const chartSeries: ChartSeries[] = useMemo(() => {
     const deposits = run.flows.reduce<number[]>((acc, f) => {
       const prev = acc.length ? acc[acc.length - 1] : 0;
@@ -71,6 +81,11 @@ export function Results({ dates, run, summary, bench, yearly, holdings, sources 
       .map(([name, n]) => `${n} via ${name}`)
       .join(" · ");
   }, [sources]);
+
+  // an alias is never silent: BTC showing bitcoin history says so
+  const aliasNote = Object.entries(resolved)
+    .map(([from, to]) => `${from} → ${to}`)
+    .join(" · ");
 
   const downloadCsv = () => {
     const rows = [
@@ -146,7 +161,10 @@ export function Results({ dates, run, summary, bench, yearly, holdings, sources 
       <div className="card">
         <div className="card-head">
           <h2>Balance over time</h2>
-          <span className="muted">prices: {sourceSummary}</span>
+          <span className="muted">
+            prices: {sourceSummary}
+            {aliasNote && ` · ${aliasNote}`}
+          </span>
         </div>
         <Chart dates={dates} series={chartSeries} />
       </div>

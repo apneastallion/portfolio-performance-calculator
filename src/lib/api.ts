@@ -6,11 +6,15 @@ export interface SeriesPayload {
   close: number[];
   source: "yahoo" | "stooq";
   adjusted: boolean;
+  /** upstream ticker actually used, e.g. BTC -> BTC-USD */
+  resolved?: string;
 }
 
 export interface LoadResult {
   panel: Panel;
   sources: Record<string, string>;
+  /** only the symbols whose upstream ticker differs from what the user typed */
+  resolved: Record<string, string>;
   errors: string[];
 }
 
@@ -69,6 +73,7 @@ export async function loadPrices(
   const series: SeriesPayload[] = [];
   const errors: string[] = [];
   const sources: Record<string, string> = {};
+  const resolved: Record<string, string> = {};
 
   // A cold symbol costs a full-history round trip, so fetch a few at a time rather
   // than one after another; the progress bar still advances per completed symbol.
@@ -82,6 +87,7 @@ export async function loadPrices(
       if (got && got.dates.length > 1) {
         series.push(got);
         sources[sym] = got.source;
+        if (got.resolved && got.resolved !== sym) resolved[sym] = got.resolved;
       } else {
         errors.push(sym);
       }
@@ -92,13 +98,13 @@ export async function loadPrices(
   );
   onProgress?.(symbols.length, symbols.length, "");
 
-  if (!series.length) return { panel: { dates: [], prices: {} }, sources, errors };
+  if (!series.length) return { panel: { dates: [], prices: {} }, sources, resolved, errors };
 
   // intersection of trading days across every symbol
   let common = new Set(series[0].dates);
   for (const s of series.slice(1)) common = new Set(s.dates.filter((d) => common.has(d)));
   const dates = [...common].sort();
-  if (dates.length < 2) return { panel: { dates: [], prices: {} }, sources, errors };
+  if (dates.length < 2) return { panel: { dates: [], prices: {} }, sources, resolved, errors };
 
   const prices: Record<string, number[]> = {};
   for (const s of series) {
@@ -106,5 +112,5 @@ export async function loadPrices(
     prices[s.symbol] = dates.map((d) => map.get(d) as number);
   }
 
-  return { panel: { dates, prices }, sources, errors };
+  return { panel: { dates, prices }, sources, resolved, errors };
 }

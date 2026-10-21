@@ -44,6 +44,24 @@ Full history is cached per symbol in the Workers Cache API for 12 hours, so repe
 visits and shared tickers never touch upstream. Every response carries its source, which
 the UI displays under the chart title.
 
+### Crypto tickers
+
+Yahoo has no bare coin symbols: a coin is `<SYM>-USD` (`BTC-USD`, `ETH-USD`). Several
+bare codes now belong to *funds* instead — `BTC` and `ETH` are the 2024 Grayscale mini
+trusts — so a portfolio holding "BTC" used to start in July 2024 rather than with
+bitcoin itself. The worker therefore maps the majors (`BTC`, `ETH`, `SOL`, `XRP`, `DOGE`,
+`ADA`, `LTC`, `AVAX`, `LINK`, `UNI`, …) to their USD pair, and the chart header states the
+substitution (`prices: 2 via yahoo · BTC → BTC-USD`).
+
+Anything not on that list works with the explicit pair, e.g. `SUI-USD` or `APT-USD` —
+tickers that are also prominent U.S. listings (`TRX`, `APT`, `SUI`, `SAND`, `STX`, `AXS`)
+are deliberately left as equities so those shares stay reachable — `SOL` is the exception,
+aliased to Solana because that is what the code is almost always meant to be. Because the
+alias wins, the mini-trust ETFs are not addressable by their ticker.
+
+Crypto trades every day while shares do not, so a mixed portfolio is marked on the shared
+trading calendar (weekdays); weekend moves show up in the next session's close.
+
 Caveats: Yahoo is an unofficial endpoint that can change without notice, Stooq's
 adjustment semantics are undocumented (the UI flags it as such), and neither is an
 audited total-return feed. No intraday data, spreads, taxes, or market impact.

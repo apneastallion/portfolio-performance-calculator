@@ -24,6 +24,7 @@ interface Outcome {
   summary: Summary;
   bench: { run: Run; summary: Summary };
   sources: Record<string, string>;
+  resolved: Record<string, string>;
   /** target weight actually used per symbol, after dropping failed tickers */
   targets: Record<string, number>;
 }
@@ -260,6 +261,7 @@ export default function App() {
         summary,
         bench: { run: benchRun, summary: benchSummary },
         sources: loaded.sources,
+        resolved: loaded.resolved,
         targets: Object.fromEntries(usable.map((s, i) => [s, weights[i]])),
       });
       // drop tickers that returned nothing so the chip list, the "equal weight across N"
@@ -584,6 +586,7 @@ export default function App() {
               yearly={yearlyTable(outcome.run, outcome.dates)}
               holdings={holdingRows}
               sources={outcome.sources}
+              resolved={outcome.resolved}
             />
           ) : (
             <div className="card empty">
