@@ -59,6 +59,10 @@ body {
   max-width: 62ch;
 }
 
+.masthead > div:first-child {
+  min-width: 0;
+}
+
 .badge {
   white-space: nowrap;
   font-size: 12px;
@@ -82,6 +86,32 @@ body {
   .layout {
     grid-template-columns: 1fr;
   }
+}
+
+/* the badge must not force the page wider than a phone */
+@media (max-width: 640px) {
+  .app {
+    padding: 20px 16px 48px;
+  }
+  .masthead {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .masthead h1 {
+    font-size: 25px;
+  }
+  .badge {
+    white-space: normal;
+    align-self: flex-start;
+  }
+}
+
+/* grid children default to min-width:auto, which lets a wide table stretch the
+   whole layout past the viewport on a phone; zero it and let them scroll instead */
+.layout > *,
+main,
+.panel {
+  min-width: 0;
 }
 
 .panel {
@@ -126,6 +156,7 @@ section {
 input,
 select {
   width: 100%;
+  min-width: 0;
   font: inherit;
   color: var(--ink);
   background: #fff;
@@ -495,6 +526,25 @@ button {
 /* ------------------------------------------------------------------ tables */
 .table-wrap {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* fit all four yearly columns on a phone instead of clipping the last one */
+@media (max-width: 640px) {
+  th,
+  td {
+    padding: 8px 6px;
+  }
+  table {
+    font-size: 13px;
+  }
+  th {
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+  }
+  .tag {
+    display: none;
+  }
 }
 
 table {
