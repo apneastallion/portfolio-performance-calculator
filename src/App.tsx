@@ -555,7 +555,9 @@ export default function App() {
                 ? `Each holding gets ${equalPct.toFixed(1)}% and the mix is reset to equal every year.`
                 : effectiveRebalance === "annual"
                   ? "These targets are restored on each anniversary of the start date."
-                  : "Weights are set once at the start and then drift with the market."}
+                  : effectiveRebalance === "band"
+                    ? "These targets are restored as soon as a holding drifts 5 points off."
+                    : "Weights are set once at the start and then drift with the market."}
             </p>
           </section>
 
@@ -650,16 +652,10 @@ export default function App() {
                 <span className="hint tight">Equal weight rebalances automatically.</span>
               )}
               {weightMode === "custom" && rebalance === "annual" && (
-                <span className="hint tight">
-                  On each anniversary the winners above target are sold and the money is
-                  spread over the holdings below it.
-                </span>
+                <span className="hint tight">Excess above target is sold each anniversary.</span>
               )}
               {weightMode === "custom" && rebalance === "band" && (
-                <span className="hint tight">
-                  As soon as a holding drifts 5 points from its target, the excess is sold
-                  and redistributed to the others.
-                </span>
+                <span className="hint tight">Trade once a holding drifts 5 points off target.</span>
               )}
             </div>
             <div>
