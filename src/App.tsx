@@ -24,7 +24,12 @@ interface Outcome {
   summary: Summary;
   bench: { run: Run; summary: Summary };
   sources: Record<string, string>;
+  /** target weight actually used per symbol, after dropping failed tickers */
+  targets: Record<string, number>;
 }
+
+/** Equal weight maintains itself; custom weights are whatever the user types. */
+type WeightMode = "equal" | "custom";
 
 const PRESETS = ["1Y", "3Y", "5Y", "10Y", "20Y", "Max"] as const;
 type Preset = (typeof PRESETS)[number];
@@ -54,14 +59,34 @@ export default function App() {
   const [monthly, setMonthly] = useState(500);
   const [rebalance, setRebalance] = useState<Rebalance>("annual");
   const [costBps, setCostBps] = useState(10);
+  const [weightMode, setWeightMode] = useState<WeightMode>("equal");
+  const [customWeights, setCustomWeights] = useState<Record<number, number>>({ 1: 50, 2: 50 });
 
   const [busy, setBusy] = useState(false);
+  const [ranSignature, setRanSignature] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [failed, setFailed] = useState<string[]>([]);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const ranOnce = useRef(false);
+
+  /** Scale a weight map to exactly 100%, keeping the proportions, residue on the largest. */
+  const roundTo100 = (raw: Record<number, number>): Record<number, number> => {
+    const ids = Object.keys(raw).map(Number);
+    const total = ids.reduce((s, id) => s + raw[id], 0);
+    if (total <= 0) return raw;
+    const out: Record<number, number> = {};
+    let sum = 0;
+    ids.forEach((id) => {
+      const w = Math.round((raw[id] / total) * 10_000) / 100;
+      out[id] = w;
+      sum += w;
+    });
+    const biggest = ids.reduce((a, b) => (raw[b] > raw[a] ? b : a));
+    out[biggest] = Math.round((out[biggest] + (100 - sum)) * 100) / 100;
+    return out;
+  };
 
   const addSymbol = (raw: string) => {
     const sym = raw.trim().toUpperCase();
@@ -70,14 +95,78 @@ export default function App() {
       return;
     }
     setError(null);
-    setHoldings((prev) =>
-      prev.some((h) => h.symbol === sym) ? prev : [...prev, { id: Date.now(), symbol: sym }],
-    );
     setDraft("");
+    if (holdings.some((h) => h.symbol === sym)) return;
+    const id = Date.now();
+    const next = [...holdings, { id, symbol: sym }];
+    if (weightMode === "custom") {
+      // the newcomer takes an equal share and the rest keep their relative tilt
+      const share = 100 / next.length;
+      const keep = (100 - share) / 100;
+      const raw: Record<number, number> = {};
+      holdings.forEach((h) => {
+        raw[h.id] = (customWeights[h.id] ?? 0) * keep;
+      });
+      raw[id] = share;
+      setCustomWeights(roundTo100(raw));
+    }
+    setHoldings(next);
   };
 
-  const remove = (id: number) =>
-    setHoldings((prev) => (prev.length > 1 ? prev.filter((h) => h.id !== id) : prev));
+  const remove = (id: number) => {
+    if (holdings.length <= 1) return;
+    const next = holdings.filter((h) => h.id !== id);
+    if (weightMode === "custom") {
+      // the removed slice is shared out proportionally, so the mix stays valid
+      const raw: Record<number, number> = {};
+      next.forEach((h) => {
+        raw[h.id] = customWeights[h.id] ?? 0;
+      });
+      setCustomWeights(roundTo100(raw));
+    }
+    setHoldings(next);
+  };
+
+  /** Split 100% as evenly as the cent allows, putting the remainder on the last one. */
+  const distributeEqually = (list: Holding[] = holdings) => {
+    const n = list.length;
+    const each = Math.floor((100 / n) * 100) / 100;
+    const next: Record<number, number> = {};
+    list.forEach((h, i) => {
+      next[h.id] = i === n - 1 ? Math.round((100 - each * (n - 1)) * 100) / 100 : each;
+    });
+    setCustomWeights(next);
+  };
+
+  const customSum = holdings.reduce((s, h) => s + (customWeights[h.id] ?? 0), 0);
+
+  const switchMode = (mode: WeightMode) => {
+    // keep whatever percentages the user already set; only seed a 100% mix when the
+    // custom map does not cover the current holdings
+    if (mode === "custom" && Math.abs(customSum - 100) >= 0.01) distributeEqually();
+    setWeightMode(mode);
+  };
+
+  // equal weight is only meaningful when it is maintained, so it always rebalances
+  const effectiveRebalance: Rebalance = weightMode === "equal" ? "annual" : rebalance;
+  const equalPct = 100 / Math.max(1, holdings.length);
+  const targetPct = (h: Holding) =>
+    weightMode === "equal" ? equalPct : customWeights[h.id] ?? 0;
+  const totalPct = holdings.reduce((sum, h) => sum + targetPct(h), 0);
+  const weightsValid = weightMode === "equal" || Math.abs(totalPct - 100) < 0.01;
+
+  // every input that changes the numbers, so results can say they are out of date
+  const signature = JSON.stringify({
+    // the effective targets, not the mode: equal 50/50 and typed 50/50 produce the same numbers
+    holdings: holdings.map((h) => [h.symbol, Number(targetPct(h).toFixed(4))]),
+    initial,
+    monthly,
+    start,
+    end,
+    costBps,
+    rebalance: effectiveRebalance,
+  });
+  const stale = outcome !== null && ranSignature !== null && ranSignature !== signature;
 
   const run = useCallback(async () => {
     if (!holdings.length) return;
@@ -85,13 +174,29 @@ export default function App() {
       setError("The start date must be before the end date.");
       return;
     }
+    if (!weightsValid) {
+      setError(
+        `Weights must add up to 100% — they currently total ${totalPct.toFixed(1)}%.`,
+      );
+      return;
+    }
+
+    // a 0% holding is staged in the editor but is not part of the portfolio, so it is
+    // neither fetched nor plotted
+    const active = holdings.filter(
+      (h) => weightMode === "equal" || (customWeights[h.id] ?? 0) > 0,
+    );
+    if (!active.length) {
+      setError("Give at least one holding a weight above 0%.");
+      return;
+    }
+
     setBusy(true);
     setError(null);
     setFailed([]);
     setProgress(4);
     setStage("Looking up prices…");
-
-    const symbols = [...new Set([...holdings.map((h) => h.symbol), "SPY"])];
+    const symbols = [...new Set([...active.map((h) => h.symbol), "SPY"])];
     let loaded: LoadResult;
     try {
       loaded = await loadPrices(symbols, start, end, (done, total, sym) => {
@@ -104,7 +209,7 @@ export default function App() {
       return;
     }
 
-    const usable = holdings.map((h) => h.symbol).filter((s) => loaded.panel.prices[s]);
+    const usable = active.map((h) => h.symbol).filter((s) => loaded.panel.prices[s]);
     if (!usable.length || !loaded.panel.prices["SPY"]) {
       setBusy(false);
       setError(
@@ -120,7 +225,14 @@ export default function App() {
 
     try {
       const panel = loaded.panel;
-      const weights = usable.map(() => 1 / usable.length);
+      // weights come from the form, renormalised across the tickers that actually
+      // returned data so a failed symbol does not leave part of the account in cash
+      const raw = usable.map((sym) => {
+        const h = active.find((x) => x.symbol === sym);
+        return h ? targetPct(h) : 0;
+      });
+      const rawSum = raw.reduce((a, b) => a + b, 0) || 1;
+      const weights = raw.map((w) => w / rawSum);
       const runOut = runPortfolio({
         panel,
         symbols: usable,
@@ -128,7 +240,7 @@ export default function App() {
         initial,
         monthly,
         costBps,
-        rebalance,
+        rebalance: effectiveRebalance,
       });
       const benchRun = runPortfolio({
         panel,
@@ -148,6 +260,7 @@ export default function App() {
         summary,
         bench: { run: benchRun, summary: benchSummary },
         sources: loaded.sources,
+        targets: Object.fromEntries(usable.map((s, i) => [s, weights[i]])),
       });
       // drop tickers that returned nothing so the chip list, the "equal weight across N"
       // label and the holdings table all describe the same portfolio
@@ -155,6 +268,7 @@ export default function App() {
         setHoldings((prev) => prev.filter((h) => !loaded.errors.includes(h.symbol)));
       }
       setFailed(loaded.errors);
+      setRanSignature(signature);
       setProgress(100);
       setStage("Done");
     } catch (e) {
@@ -162,7 +276,21 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [holdings, start, end, initial, monthly, costBps, rebalance]);
+  }, [
+    holdings,
+    start,
+    end,
+    initial,
+    monthly,
+    costBps,
+    rebalance,
+    weightMode,
+    customWeights,
+    weightsValid,
+    totalPct,
+    signature,
+    effectiveRebalance,
+  ]);
 
   useEffect(() => {
     if (ranOnce.current) return;
@@ -174,10 +302,9 @@ export default function App() {
   const holdingRows = useMemo(() => {
     if (!outcome) return [];
     const total = outcome.summary.finalValue || 1;
-    const w = 1 / Math.max(1, Object.keys(outcome.run.finalWeights).length);
     return Object.entries(outcome.run.finalWeights).map(([symbol, fw]) => ({
       symbol,
-      weight: w,
+      weight: outcome.targets[symbol] ?? 0,
       finalWeight: fw,
       value: fw * total,
     }));
@@ -200,16 +327,85 @@ export default function App() {
         <aside className="panel">
           <section>
             <label className="field-label">Holdings</label>
-            <div className="chips">
-              {holdings.map((h) => (
-                <span className="chip" key={h.id}>
-                  {h.symbol}
-                  <button aria-label={`Remove ${h.symbol}`} onClick={() => remove(h.id)}>
-                    ×
-                  </button>
-                </span>
-              ))}
+            <div className="segmented" role="group" aria-label="Weighting">
+              <button
+                className={weightMode === "equal" ? "seg active" : "seg"}
+                onClick={() => switchMode("equal")}
+                aria-pressed={weightMode === "equal"}
+              >
+                Equal weight
+              </button>
+              <button
+                className={weightMode === "custom" ? "seg active" : "seg"}
+                onClick={() => switchMode("custom")}
+                aria-pressed={weightMode === "custom"}
+              >
+                Set percentages
+              </button>
             </div>
+
+            {weightMode === "custom" && (
+              <div className="weights">
+                {holdings.map((h) => (
+                  <div className="weight-row" key={h.id}>
+                    <span className="chip small">{h.symbol}</span>
+                    <div className="weight-input">
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={customWeights[h.id] ?? 0}
+                        aria-label={`${h.symbol} weight in percent`}
+                        onChange={(e) => {
+                          const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                          setCustomWeights((prev) => ({ ...prev, [h.id]: v }));
+                        }}
+                      />
+                      <span>%</span>
+                    </div>
+                    <button
+                      className="icon-btn"
+                      aria-label={`Remove ${h.symbol}`}
+                      onClick={() => remove(h.id)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                <div className="total-line">
+                  <span>
+                    Total{" "}
+                    <strong className={weightsValid ? "pos" : "neg"}>
+                      {totalPct.toFixed(1)}%
+                    </strong>
+                    {!weightsValid && " — must equal 100%"}
+                  </span>
+                  <button className="link" onClick={() => distributeEqually()}>
+                    Distribute equally
+                  </button>
+                </div>
+                {holdings.some((h) => (customWeights[h.id] ?? 0) <= 0) && (
+                  <p className="hint tight">
+                    0% holdings stay in the list but are left out of the simulation.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {weightMode === "equal" && (
+              <div className="chips">
+                {holdings.map((h) => (
+                  <span className="chip" key={h.id}>
+                    {h.symbol}
+                    <span className="chip-pct">{`${targetPct(h).toFixed(1)}%`}</span>
+                    <button aria-label={`Remove ${h.symbol}`} onClick={() => remove(h.id)}>
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="row">
               <input
                 value={draft}
@@ -238,7 +434,11 @@ export default function App() {
               </button>
             </div>
             <p className="hint">
-              Equal weight across {holdings.length} {holdings.length === 1 ? "holding" : "holdings"}.
+              {weightMode === "equal"
+                ? `Each holding gets ${equalPct.toFixed(1)}% and the mix is reset to equal every year.`
+                : effectiveRebalance === "annual"
+                  ? "These targets are restored on each anniversary of the start date."
+                  : "Weights are set once at the start and then drift with the market."}
             </p>
           </section>
 
@@ -321,12 +521,16 @@ export default function App() {
               </label>
               <select
                 id="rebalance"
-                value={rebalance}
+                value={effectiveRebalance}
+                disabled={weightMode === "equal"}
                 onChange={(e) => setRebalance(e.target.value as Rebalance)}
               >
                 <option value="annual">Annual</option>
                 <option value="none">Buy &amp; hold</option>
               </select>
+              {weightMode === "equal" && (
+                <span className="hint tight">Equal weight rebalances automatically.</span>
+              )}
             </div>
             <div>
               <label className="field-label" htmlFor="cost">
@@ -344,7 +548,7 @@ export default function App() {
             </div>
           </section>
 
-          <button className="primary" onClick={run} disabled={busy}>
+          <button className="primary" onClick={run} disabled={busy || !weightsValid}>
             {busy ? "Calculating…" : "Calculate"}
           </button>
 
@@ -366,6 +570,11 @@ export default function App() {
         </aside>
 
         <main>
+          {stale && (
+            <div className="alert soft stale">
+              Inputs changed since this run — press Calculate to refresh the numbers.
+            </div>
+          )}
           {outcome ? (
             <Results
               dates={outcome.dates}

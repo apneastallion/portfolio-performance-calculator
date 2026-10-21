@@ -8,8 +8,12 @@ Live app: <https://portfolio-performance-calculator.pages.dev>
 
 ## What it does
 
-- **Portfolio** — add any number of tickers (stocks, ETFs, or `SPY` as an S&P 500 proxy),
-  equally weighted. Unknown symbols are fetched on demand; nothing is hard-coded.
+- **Portfolio** — add any number of tickers (stocks, ETFs, or `SPY` as an S&P 500 proxy).
+  Unknown symbols are fetched on demand; nothing is hard-coded.
+- **Weights** — either **equal weight** (the mix is reset to equal every year) or **set
+  percentages** per ticker, which must total 100% and are restored on each anniversary (or
+  left to drift, under buy & hold). A new ticker takes an equal share and rescales the rest
+  proportionally; removing one hands its slice to the others.
 - **Cash flows** — a starting balance plus a signed monthly amount: positive deposits,
   negative withdrawals. Applied on the first trading session of each month.
 - **Dates** — 1Y / 3Y / 5Y / 10Y / 20Y / Max presets, or any custom range.
@@ -48,8 +52,10 @@ audited total-return feed. No intraday data, spreads, taxes, or market impact.
 
 - Trades execute at the adjusted close; the fee is paid *out of* each deposit, so a
   $3,000 contribution buys $2,997.00 of ETF at 10 bp.
-- Equal weights; rebalancing is either **annual** (back to target on each anniversary) or
-  **buy & hold** (never trade again). Withdrawals are pro-rated across holdings.
+- Weights are either equal (always rebalanced annually) or the percentages you set;
+  rebalancing is then either **annual** (back to target on each anniversary) or **buy &
+  hold** (never trade again). Monthly deposits are always split at target weights.
+  Withdrawals are pro-rated across holdings.
 - Deposits are invested immediately; idle cash earns nothing. Sharpe uses a 0% risk-free
   rate and is labelled accordingly.
 - Expense ratios are already inside ETF prices and are not charged twice.
@@ -76,7 +82,9 @@ npm run deploy
 `npm run check:engine` runs the TypeScript engine against the reference results from the
 Python study in the parent repository (`output/etf_dca`): SPY, 2022-10-20 → 2026-10-20,
 $3,000 then $3,000/month at 10 bp. It checks session count, deposit count, total invested,
-terminal value, TWR, MWR and max drawdown, and fails the build if any drifts.
+terminal value, TWR, MWR and max drawdown, then runs a synthetic 70/30 book to confirm the
+target weights are honoured, annual rebalancing restores them, buy & hold lets them drift,
+and weights that do not sum to 1 are rejected. It fails if any value drifts.
 
 Current output: terminal value \$218,472.18 vs \$218,472.17 expected (the cent difference
 is fixture price rounding); TWR, MWR and drawdown match to 1e-7.

@@ -46,6 +46,56 @@ const checks = [
   ["max drawdown", s.mdd, -0.187552341614579, 1e-7],
 ];
 
+// --- custom weights: 70/30 must be honoured, and annual rebalancing must restore it
+const dts = [];
+let cursor = new Date(Date.UTC(2021, 0, 4));
+while (dts.length < 780) {
+  const wd = cursor.getUTCDay();
+  if (wd !== 0 && wd !== 6) dts.push(cursor.toISOString().slice(0, 10));
+  cursor = new Date(cursor.getTime() + 86_400_000);
+}
+// one asset doubles a year in, the other is flat: a 70/30 mix should drift to ~82/18
+const doubled = 260;
+const panel2 = {
+  dates: dts,
+  prices: {
+    AAA: dts.map((_, i) => (i < doubled ? 100 : 200)),
+    BBB: dts.map(() => 100),
+  },
+};
+const runW = (rebalance) =>
+  runPortfolio({
+    panel: panel2,
+    symbols: ["AAA", "BBB"],
+    weights: [0.7, 0.3],
+    initial: 10000,
+    monthly: 0,
+    costBps: 0,
+    rebalance,
+  });
+
+const rebalanced = runW("annual");
+const drifted = runW("none");
+checks.push(["70% sleeve after annual rebalance", rebalanced.finalWeights.AAA, 0.7, 1e-9]);
+checks.push(["30% sleeve after annual rebalance", rebalanced.finalWeights.BBB, 0.3, 1e-9]);
+checks.push(["buy & hold lets 70/30 drift", drifted.finalWeights.AAA, 1.4 / 1.7, 1e-9]);
+
+let rejected = false;
+try {
+  runPortfolio({
+    panel: panel2,
+    symbols: ["AAA", "BBB"],
+    weights: [0.7, 0.2],
+    initial: 1000,
+    monthly: 0,
+    costBps: 0,
+    rebalance: "none",
+  });
+} catch {
+  rejected = true;
+}
+checks.push(["weights that do not sum to 1 rejected", rejected ? 1 : 0, 1, 0]);
+
 let failures = 0;
 for (const [name, got, want, tol] of checks) {
   const ok = Math.abs(got - want) <= tol;

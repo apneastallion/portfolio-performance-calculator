@@ -102,6 +102,16 @@ function rebalanceIndexes(dates: string[]): number[] {
 
 export function runPortfolio(input: RunInput): Run {
   const { panel, symbols, weights, initial, monthly, costBps, rebalance } = input;
+  if (symbols.length !== weights.length) {
+    throw new Error("weights must have one entry per symbol");
+  }
+  if (weights.some((w) => !Number.isFinite(w) || w < 0)) {
+    throw new Error("weights must be finite and non-negative");
+  }
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+  if (Math.abs(weightSum - 1) > 1e-6) {
+    throw new Error(`weights must sum to 1, got ${weightSum}`);
+  }
   const cost = costBps / 10_000;
   const n = panel.dates.length;
   const px = symbols.map((s) => panel.prices[s]);
