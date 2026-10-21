@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.worker.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".worker-build",
+    "declaration": false,
+    "sourceMap": false,
+    "removeComments": false
+  }
+}
