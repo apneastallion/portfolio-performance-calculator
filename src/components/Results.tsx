@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { Run, Summary, YearRow } from "../lib/engine";
 import { Chart, type ChartSeries } from "./Chart";
+import { Projection } from "./Projection";
 import { money, pct, shortDate, signedMoney, signedPct } from "../lib/format";
 
 interface Holding {
@@ -19,6 +20,8 @@ interface Props {
   holdings: Holding[];
   sources: Record<string, string>;
   resolved: Record<string, string>;
+  /** signed monthly flow from the form, used as the projection default */
+  monthly: number;
 }
 
 function Card({
@@ -50,6 +53,7 @@ export function Results({
   holdings,
   sources,
   resolved,
+  monthly,
 }: Props) {
   const chartSeries: ChartSeries[] = useMemo(() => {
     const deposits = run.flows.reduce<number[]>((acc, f) => {
@@ -82,9 +86,10 @@ export function Results({
       .join(" · ");
   }, [sources]);
 
-  // an alias is never silent: BTC showing bitcoin history says so
+  // an alias is never silent: BTC showing bitcoin history, or QQQL quoted in Toronto,
+  // states the mapping; the value carries its own arrow, e.g. "→ BTC-USD"
   const aliasNote = Object.entries(resolved)
-    .map(([from, to]) => `${from} → ${to}`)
+    .map(([from, note]) => `${from} ${note}`)
     .join(" · ");
 
   const downloadCsv = () => {
@@ -247,6 +252,8 @@ export function Results({
           (risk-free assumed 0).
         </p>
       </div>
+
+      <Projection summary={summary} monthly={monthly} />
     </div>
   );
 }

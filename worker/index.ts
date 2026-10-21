@@ -20,8 +20,12 @@ interface Series {
   close: number[];
   source: "yahoo" | "stooq";
   adjusted: boolean;
-  /** upstream ticker actually used, e.g. BTC -> BTC-USD */
+  /** upstream ticker actually used, e.g. BTC -> BTC-USD, JEPG -> JEPG.L */
   resolved?: string;
+  /** quote currency of the upstream data; cleared once converted to USD */
+  currency?: string;
+  /** set when prices were converted, e.g. "CAD" for a Toronto listing */
+  convertedFrom?: string;
 }
 
 /**
@@ -60,7 +64,13 @@ function json(body: unknown, status = 200, maxAge = 300): Response {
   });
 }
 
-async function yahooSymbol(symbol: string): Promise<Series | null> {
+interface RawSeries {
+  dates: string[];
+  close: number[];
+  currency: string;
+}
+
+async function yahooRaw(symbol: string): Promise<RawSeries | null> {
   const now = Math.floor(Date.now() / 1000) + 86_400;
   const url =
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
@@ -87,10 +97,131 @@ async function yahooSymbol(symbol: string): Promise<Series | null> {
       close.push(v);
     }
     if (dates.length < 2) return null;
-    return { symbol, dates, close, source: "yahoo", adjusted: true, resolved: symbol };
+    const currency = typeof result?.meta?.currency === "string" ? result.meta.currency : "USD";
+    return { dates, close, currency };
   } catch {
     return null;
   }
+}
+
+/**
+ * Yahoo search, used only when the exact ticker has no chart: plenty of funds are
+ * listed outside the US (JEPG is London, QQQL is Toronto) and their bare code means
+ * nothing to the chart API. Only same-root listings are accepted, so searching a
+ * typo cannot silently substitute an unrelated company.
+ */
+async function yahooListings(symbol: string): Promise<string[]> {
+  const url =
+    `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}` +
+    `&quotesCount=10&newsCount=0&listsCount=0&enableFuzzyQuery=false`;
+  try {
+    const res = await fetch(url, {
+      headers: { "user-agent": UA, accept: "application/json" },
+      signal: AbortSignal.timeout(9000),
+    });
+    if (!res.ok) return [];
+    const payload = (await res.json()) as any;
+    const quotes: any[] = Array.isArray(payload?.quotes) ? payload.quotes : [];
+    const wanted = new Set(["EQUITY", "ETF", "MUTUALFUND", "INDEX", "CRYPTOCURRENCY"]);
+    return [
+      ...new Set(
+        quotes
+          .filter((q) => typeof q?.symbol === "string" && wanted.has(q?.quoteType))
+          .map((q) => String(q.symbol).toUpperCase())
+          .filter((s) => s === symbol || s.startsWith(`${symbol}.`)),
+      ),
+    ].slice(0, 4);
+  } catch {
+    return [];
+  }
+}
+
+const fxMem = new Map<string, { expires: number; dates: string[]; close: number[] }>();
+
+/** Daily USD-per-unit rates for a currency, cached like a price series. */
+async function loadFx(
+  pair: string,
+  ctx: ExecutionContext,
+): Promise<{ dates: string[]; close: number[] } | null> {
+  const hit = fxMem.get(pair);
+  if (hit && hit.expires > Date.now()) return hit;
+  const key = `https://ppc-cache.internal/fx/v1/${encodeURIComponent(pair)}`;
+  if (typeof caches !== "undefined") {
+    try {
+      const cached = await caches.default.match(key);
+      if (cached) {
+        const data = (await cached.json()) as { dates: string[]; close: number[] };
+        fxMem.set(pair, { expires: Date.now() + TTL, ...data });
+        return data;
+      }
+    } catch {
+      /* cache is best effort */
+    }
+  }
+  const raw = await yahooRaw(pair);
+  if (!raw) return null;
+  const data = { dates: raw.dates, close: raw.close };
+  fxMem.set(pair, { expires: Date.now() + TTL, ...data });
+  if (typeof caches !== "undefined" && ctx?.waitUntil) {
+    ctx.waitUntil(
+      caches.default
+        .put(
+          key,
+          new Response(JSON.stringify(data), {
+            headers: { "content-type": "application/json", "cache-control": `max-age=${TTL / 1000}` },
+          }),
+        )
+        .catch(() => undefined),
+    );
+  }
+  return data;
+}
+
+/**
+ * The whole app is a USD backtest, so a foreign listing is converted at the daily FX
+ * rate rather than mixed into the portfolio at face value. London quotes in pence
+ * (GBp) are scaled by 1/100 before the GBP rate is applied.
+ */
+async function toUsd(series: Series, ctx: ExecutionContext): Promise<Series | null> {
+  const quote = series.currency ?? "USD";
+  const code = quote.toUpperCase();
+  if (code === "USD") {
+    const { currency: _drop, ...rest } = series;
+    return rest;
+  }
+  const pence = quote === "GBp" || code === "GBX";
+  const fx = await loadFx(`${pence ? "GBP" : code}USD=X`, ctx);
+  if (!fx) return null;
+
+  const dates: string[] = [];
+  const close: number[] = [];
+  let j = -1;
+  for (let i = 0; i < series.dates.length; i += 1) {
+    const day = series.dates[i];
+    // carry the last known rate forward, so a foreign holiday is not a gap
+    while (j + 1 < fx.dates.length && fx.dates[j + 1] <= day) j += 1;
+    if (j < 0) continue;
+    const rate = fx.close[j];
+    if (!(rate > 0)) continue;
+    dates.push(day);
+    close.push(series.close[i] * (pence ? 0.01 : 1) * rate);
+  }
+  if (dates.length < 2) return null;
+  const { currency: _drop, ...rest } = series;
+  return { ...rest, dates, close, convertedFrom: quote };
+}
+
+/** Wrap a raw Yahoo series with the requested symbol so the UI can show the mapping. */
+function asSeries(symbol: string, candidate: string, raw: RawSeries): Series {
+  return {
+    symbol,
+    dates: raw.dates,
+    close: raw.close,
+    source: "yahoo",
+    adjusted: true,
+    resolved: candidate,
+    currency: raw.currency,
+  };
 }
 
 /**
@@ -101,12 +232,18 @@ async function yahooSymbol(symbol: string): Promise<Series | null> {
 async function fromYahoo(symbol: string): Promise<Series | null> {
   const pair = CRYPTO.has(symbol) ? `${symbol}-USD` : null;
   // never fall back to the bare crypto code: that is the fund we are avoiding
-  const candidates = pair
+  const direct = pair
     ? [pair]
     : [...new Set([symbol, symbol.replace(/\./g, "-")])];
-  for (const candidate of candidates) {
-    const hit = await yahooSymbol(candidate);
-    if (hit) return { ...hit, symbol };
+  for (const candidate of direct) {
+    const raw = await yahooRaw(candidate);
+    if (raw) return asSeries(symbol, candidate, raw);
+  }
+  if (pair) return null;
+  for (const candidate of await yahooListings(symbol)) {
+    if (direct.includes(candidate)) continue;
+    const raw = await yahooRaw(candidate);
+    if (raw) return asSeries(symbol, candidate, raw);
   }
   return null;
 }
@@ -160,7 +297,8 @@ async function loadSeries(symbol: string, ctx: ExecutionContext): Promise<Series
   if (hit && hit.expires > Date.now()) return hit.data;
 
   // v2: crypto aliases changed what these keys resolve to, so v1 entries must not be served
-  const key = `https://ppc-cache.internal/series/v2/${encodeURIComponent(symbol)}`;
+  // v3: listings resolve through search and foreign quotes are converted to USD
+  const key = `https://ppc-cache.internal/series/v3/${encodeURIComponent(symbol)}`;
   if (typeof caches !== "undefined") {
     try {
       const cached = await caches.default.match(key);
@@ -174,7 +312,8 @@ async function loadSeries(symbol: string, ctx: ExecutionContext): Promise<Series
     }
   }
 
-  const data = (await fromYahoo(symbol)) ?? (await fromStooq(symbol));
+  const yahoo = await fromYahoo(symbol);
+  const data = (yahoo ? await toUsd(yahoo, ctx) : null) ?? (await fromStooq(symbol));
   if (!data) return null;
   mem.set(symbol, { expires: Date.now() + TTL, data });
   if (typeof caches !== "undefined") {
@@ -214,18 +353,24 @@ async function handlePrices(url: URL, ctx: ExecutionContext): Promise<Response> 
 
   const loaded = await Promise.all(symbols.map((s) => loadSeries(s, ctx)));
   const series: Series[] = [];
-  const errors: string[] = [];
+  const unknown: string[] = [];
+  const outOfRange: string[] = [];
   loaded.forEach((s, i) => {
     if (!s) {
-      errors.push(symbols[i]);
+      unknown.push(symbols[i]);
       return;
     }
     const cut = slice(s, start, end);
-    if (cut.dates.length < 2) errors.push(symbols[i]);
+    // a real ticker with no overlap is a different problem from a ticker nobody has
+    if (cut.dates.length < 2) outOfRange.push(symbols[i]);
     else series.push(cut);
   });
 
-  return json({ series, errors, asOf: new Date().toISOString() }, 200, 600);
+  return json(
+    { series, errors: [...unknown, ...outOfRange], unknown, outOfRange, asOf: new Date().toISOString() },
+    200,
+    600,
+  );
 }
 
 export default {

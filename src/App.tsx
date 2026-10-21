@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { loadPrices, type LoadResult } from "./lib/api";
+import { loadPrices, trimToFirstHolding, type LoadResult } from "./lib/api";
 import {
   runPortfolio,
   summarize,
@@ -62,6 +62,8 @@ export default function App() {
   const [costBps, setCostBps] = useState(10);
   const [weightMode, setWeightMode] = useState<WeightMode>("equal");
   const [customWeights, setCustomWeights] = useState<Record<number, number>>({ 1: 50, 2: 50 });
+  /** holdings whose percentage is pinned while the others absorb the change */
+  const [locked, setLocked] = useState<Record<number, boolean>>({});
 
   const [busy, setBusy] = useState(false);
   const [ranSignature, setRanSignature] = useState<string | null>(null);
@@ -69,24 +71,69 @@ export default function App() {
   const [stage, setStage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [failed, setFailed] = useState<string[]>([]);
+  const [shortHistory, setShortHistory] = useState<string[]>([]);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const ranOnce = useRef(false);
 
-  /** Scale a weight map to exactly 100%, keeping the proportions, residue on the largest. */
-  const roundTo100 = (raw: Record<number, number>): Record<number, number> => {
-    const ids = Object.keys(raw).map(Number);
-    const total = ids.reduce((s, id) => s + raw[id], 0);
-    if (total <= 0) return raw;
+  const round2 = (v: number) => Math.round(v * 100) / 100;
+
+  /** Spread `avail` across `free` in proportion to what they hold now (or evenly). */
+  const spread = (
+    free: Holding[],
+    weights: Record<number, number>,
+    avail: number,
+  ): Record<number, number> => {
+    const base = free.reduce((s, h) => s + (weights[h.id] ?? 0), 0);
     const out: Record<number, number> = {};
     let sum = 0;
-    ids.forEach((id) => {
-      const w = Math.round((raw[id] / total) * 10_000) / 100;
-      out[id] = w;
-      sum += w;
+    free.forEach((h) => {
+      const share = base > 0.0001 ? (weights[h.id] ?? 0) / base : 1 / free.length;
+      out[h.id] = round2(avail * share);
+      sum += out[h.id];
     });
-    const biggest = ids.reduce((a, b) => (raw[b] > raw[a] ? b : a));
-    out[biggest] = Math.round((out[biggest] + (100 - sum)) * 100) / 100;
+    // the cents lost to rounding land on the largest slice, so the total is exactly 100
+    const biggest = free.reduce((a, b) => (out[b.id] > out[a.id] ? b : a));
+    out[biggest.id] = round2(out[biggest.id] + (avail - sum));
     return out;
+  };
+
+  /**
+   * Give `requested` to one holding and let the unlocked holdings absorb the rest of
+   * 100%, so editing a percentage never leaves the user solving the arithmetic.
+   */
+  const balanceAround = (
+    list: Holding[],
+    id: number,
+    requested: number,
+    weights: Record<number, number>,
+    locks: Record<number, boolean>,
+  ): Record<number, number> => {
+    const others = list.filter((h) => h.id !== id);
+    const lockedSum = others.reduce((s, h) => s + (locks[h.id] ? weights[h.id] ?? 0 : 0), 0);
+    const free = others.filter((h) => !locks[h.id]);
+    // locked holdings cannot give up room, so the edited one is capped at what is left —
+    // unless every other weight is pinned, in which case the total is reported as invalid
+    // rather than silently swallowing what the user typed
+    const ceiling = free.length ? 100 - lockedSum : 100;
+    const value = Math.max(0, Math.min(round2(requested), round2(ceiling)));
+    const next: Record<number, number> = { [id]: value };
+    others.forEach((h) => {
+      if (locks[h.id]) next[h.id] = round2(weights[h.id] ?? 0);
+    });
+    if (!free.length) return next;
+    return { ...next, ...spread(free, weights, round2(100 - lockedSum - value)) };
+  };
+
+  /** Fill the gap to 100% from the unlocked holdings only. */
+  const fillTo100 = (
+    list: Holding[],
+    weights: Record<number, number>,
+    locks: Record<number, boolean>,
+  ): Record<number, number> => {
+    const free = list.filter((h) => !locks[h.id]);
+    if (!free.length) return { ...weights };
+    const lockedSum = list.reduce((s, h) => s + (locks[h.id] ? weights[h.id] ?? 0 : 0), 0);
+    return { ...weights, ...spread(free, weights, round2(100 - lockedSum)) };
   };
 
   const addSymbol = (raw: string) => {
@@ -101,15 +148,11 @@ export default function App() {
     const id = Date.now();
     const next = [...holdings, { id, symbol: sym }];
     if (weightMode === "custom") {
-      // the newcomer takes an equal share and the rest keep their relative tilt
-      const share = 100 / next.length;
-      const keep = (100 - share) / 100;
-      const raw: Record<number, number> = {};
-      holdings.forEach((h) => {
-        raw[h.id] = (customWeights[h.id] ?? 0) * keep;
-      });
-      raw[id] = share;
-      setCustomWeights(roundTo100(raw));
+      // the newcomer takes an equal share, taken from the unlocked holdings
+      const share = round2(100 / next.length);
+      setCustomWeights(
+        balanceAround(next, id, share, { ...customWeights, [id]: share }, locked),
+      );
     }
     setHoldings(next);
   };
@@ -118,24 +161,35 @@ export default function App() {
     if (holdings.length <= 1) return;
     const next = holdings.filter((h) => h.id !== id);
     if (weightMode === "custom") {
-      // the removed slice is shared out proportionally, so the mix stays valid
+      // the removed slice is shared out across the unlocked holdings
       const raw: Record<number, number> = {};
       next.forEach((h) => {
         raw[h.id] = customWeights[h.id] ?? 0;
       });
-      setCustomWeights(roundTo100(raw));
+      const locks = { ...locked };
+      delete locks[id];
+      setCustomWeights(fillTo100(next, raw, locks));
+      setLocked(locks);
     }
     setHoldings(next);
   };
 
-  /** Split 100% as evenly as the cent allows, putting the remainder on the last one. */
+  /** Split the unpinned part of 100% as evenly as the cent allows. */
   const distributeEqually = (list: Holding[] = holdings) => {
-    const n = list.length;
-    const each = Math.floor((100 / n) * 100) / 100;
+    const free = list.filter((h) => !locked[h.id]);
+    if (!free.length) return;
+    const lockedSum = list.reduce(
+      (s, h) => s + (locked[h.id] ? customWeights[h.id] ?? 0 : 0),
+      0,
+    );
+    const avail = round2(100 - lockedSum);
+    const each = Math.floor((avail / free.length) * 100) / 100;
     const next: Record<number, number> = {};
-    list.forEach((h, i) => {
-      next[h.id] = i === n - 1 ? Math.round((100 - each * (n - 1)) * 100) / 100 : each;
+    list.forEach((h) => {
+      next[h.id] = locked[h.id] ? round2(customWeights[h.id] ?? 0) : each;
     });
+    const last = free[free.length - 1];
+    next[last.id] = round2(avail - each * (free.length - 1));
     setCustomWeights(next);
   };
 
@@ -157,16 +211,25 @@ export default function App() {
   const weightsValid = weightMode === "equal" || Math.abs(totalPct - 100) < 0.01;
 
   // every input that changes the numbers, so results can say they are out of date
-  const signature = JSON.stringify({
-    // the effective targets, not the mode: equal 50/50 and typed 50/50 produce the same numbers
-    holdings: holdings.map((h) => [h.symbol, Number(targetPct(h).toFixed(4))]),
-    initial,
-    monthly,
-    start,
-    end,
-    costBps,
-    rebalance: effectiveRebalance,
-  });
+  const makeSignature = (list: Holding[], weights: Record<number, number> = customWeights) =>
+    JSON.stringify({
+      // the effective targets, not the mode: equal 50/50 and typed 50/50 are the same run
+      holdings: list.map((h) => [
+        h.symbol,
+        Number(
+          (weightMode === "equal" ? 100 / Math.max(1, list.length) : weights[h.id] ?? 0).toFixed(
+            4,
+          ),
+        ),
+      ]),
+      initial,
+      monthly,
+      start,
+      end,
+      costBps,
+      rebalance: effectiveRebalance,
+    });
+  const signature = makeSignature(holdings);
   const stale = outcome !== null && ranSignature !== null && ranSignature !== signature;
 
   const run = useCallback(async () => {
@@ -195,6 +258,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     setFailed([]);
+    setShortHistory([]);
     setProgress(4);
     setStage("Looking up prices…");
     const symbols = [...new Set([...active.map((h) => h.symbol), "SPY"])];
@@ -216,7 +280,8 @@ export default function App() {
       setError(
         "No usable price history for the selected symbols. Check the tickers or pick a shorter date range.",
       );
-      setFailed(loaded.errors);
+      setFailed(loaded.unknown);
+      setShortHistory(loaded.outOfRange);
       return;
     }
 
@@ -225,7 +290,8 @@ export default function App() {
     await new Promise((r) => setTimeout(r, 60));
 
     try {
-      const panel = loaded.panel;
+      // start when the portfolio does, not when the benchmark does
+      const panel = trimToFirstHolding(loaded.panel, usable);
       // weights come from the form, renormalised across the tickers that actually
       // returned data so a failed symbol does not leave part of the account in cash
       const raw = usable.map((sym) => {
@@ -264,13 +330,32 @@ export default function App() {
         resolved: loaded.resolved,
         targets: Object.fromEntries(usable.map((s, i) => [s, weights[i]])),
       });
-      // drop tickers that returned nothing so the chip list, the "equal weight across N"
-      // label and the holdings table all describe the same portfolio
-      if (loaded.errors.length) {
-        setHoldings((prev) => prev.filter((h) => !loaded.errors.includes(h.symbol)));
+      // drop tickers nobody has, so a typo does not linger in the chip list; a real ticker
+      // that is merely outside this window stays in the form with its message
+      if (loaded.unknown.length) {
+        const kept = holdings.filter((h) => !loaded.unknown.includes(h.symbol));
+        setHoldings(kept);
+        if (weightMode === "custom") {
+          const raw: Record<number, number> = {};
+          kept.forEach((h) => {
+            raw[h.id] = customWeights[h.id] ?? 0;
+          });
+          const locks = { ...locked };
+          holdings
+            .filter((h) => loaded.unknown.includes(h.symbol))
+            .forEach((h) => delete locks[h.id]);
+          const filled = fillTo100(kept, raw, locks);
+          setCustomWeights(filled);
+          setLocked(locks);
+          setRanSignature(makeSignature(kept, filled));
+        } else {
+          setRanSignature(makeSignature(kept));
+        }
+      } else {
+        setRanSignature(signature);
       }
-      setFailed(loaded.errors);
-      setRanSignature(signature);
+      setFailed(loaded.unknown);
+      setShortHistory(loaded.outOfRange);
       setProgress(100);
       setStage("Done");
     } catch (e) {
@@ -356,16 +441,41 @@ export default function App() {
                         type="number"
                         min={0}
                         max={100}
-                        step={5}
+                        step={1}
                         value={customWeights[h.id] ?? 0}
                         aria-label={`${h.symbol} weight in percent`}
                         onChange={(e) => {
                           const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
-                          setCustomWeights((prev) => ({ ...prev, [h.id]: v }));
+                          setCustomWeights((prev) =>
+                            balanceAround(holdings, h.id, v, prev, locked),
+                          );
                         }}
                       />
                       <span>%</span>
                     </div>
+                    <label
+                      className={locked[h.id] ? "lock-toggle on" : "lock-toggle"}
+                      title={
+                        locked[h.id]
+                          ? `${h.symbol} stays at this weight when others change`
+                          : `Keep ${h.symbol} at this weight while the others rebalance`
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!locked[h.id]}
+                        aria-label={`Lock ${h.symbol} weight`}
+                        onChange={(e) => {
+                          const nextLocks = { ...locked, [h.id]: e.target.checked };
+                          setLocked(nextLocks);
+                          // unlocking creates room again, so let the freed weight absorb it
+                          if (!e.target.checked) {
+                            setCustomWeights((prev) => fillTo100(holdings, prev, nextLocks));
+                          }
+                        }}
+                      />
+                      lock
+                    </label>
                     <button
                       className="icon-btn"
                       aria-label={`Remove ${h.symbol}`}
@@ -387,6 +497,11 @@ export default function App() {
                     Distribute equally
                   </button>
                 </div>
+                <p className="hint tight">
+                  {weightsValid
+                    ? "Editing one moves the rest; tick lock to hold a weight still."
+                    : "Unlock a holding so it can absorb the remainder."}
+                </p>
                 {holdings.some((h) => (customWeights[h.id] ?? 0) <= 0) && (
                   <p className="hint tight">
                     0% holdings stay in the list but are left out of the simulation.
@@ -566,7 +681,13 @@ export default function App() {
           {error && <div className="alert">{error}</div>}
           {failed.length > 0 && !error && (
             <div className="alert soft">
-              No data for {failed.join(", ")} — excluded from the portfolio.
+              No ticker found for {failed.join(", ")} — excluded from the portfolio.
+            </div>
+          )}
+          {shortHistory.length > 0 && !error && (
+            <div className="alert soft">
+              {shortHistory.join(", ")} has no prices between {start} and {end} — widen the
+              date range.
             </div>
           )}
         </aside>
@@ -587,6 +708,7 @@ export default function App() {
               holdings={holdingRows}
               sources={outcome.sources}
               resolved={outcome.resolved}
+              monthly={monthly}
             />
           ) : (
             <div className="card empty">

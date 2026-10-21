@@ -14,10 +14,11 @@ import { join } from "node:path";
 
 const dir = mkdtempSync(join(tmpdir(), "ppc-engine-"));
 execSync(
-  `npx tsc src/lib/engine.ts --outDir ${dir} --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --lib es2022`,
+  `npx tsc src/lib/engine.ts src/lib/project.ts --outDir ${dir} --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --lib es2022`,
   { stdio: "inherit" },
 );
 const { runPortfolio, summarize } = await import(join(dir, "engine.js"));
+const { project, drawdownImpact } = await import(join(dir, "project.js"));
 
 const fixture = JSON.parse(readFileSync("public/fixtures/SPY.json", "utf8"));
 const keep = fixture.dates
@@ -95,6 +96,56 @@ try {
   rejected = true;
 }
 checks.push(["weights that do not sum to 1 rejected", rejected ? 1 : 0, 1, 0]);
+
+// --- ragged history: BBB only lists 200 sessions in, and must neither truncate AAA nor
+// lose money on the day it appears. Constant prices and no costs make the expectation
+// exact: the ending value is the starting balance plus every deposit.
+const raggedDates = dts;
+const lateStart = 200;
+const ragged = {
+  dates: raggedDates,
+  prices: {
+    AAA: raggedDates.map(() => 100),
+    BBB: raggedDates.map((_, i) => (i < lateStart ? null : 100)),
+  },
+};
+const raggedRun = runPortfolio({
+  panel: ragged,
+  symbols: ["AAA", "BBB"],
+  weights: [0.5, 0.5],
+  initial: 10000,
+  monthly: 1000,
+  costBps: 0,
+  rebalance: "annual",
+});
+const raggedDeposits = raggedRun.flows.filter((f) => f > 0).length;
+checks.push(["ragged: sessions kept", raggedRun.equity.length, raggedDates.length, 0]);
+checks.push([
+  "ragged: no money lost when BBB lists",
+  raggedRun.equity[raggedRun.equity.length - 1],
+  10000 + 1000 * (raggedDeposits - 1),
+  1e-6,
+]);
+checks.push(["ragged: late ticker funded", raggedRun.units.BBB > 0 ? 1 : 0, 1, 0]);
+checks.push(["ragged: 50% sleeve after rebalance", raggedRun.finalWeights.BBB, 0.5, 1e-6]);
+
+// --- projection maths
+const flat = project({ startValue: 1000, monthly: 0, annualReturn: 0.1, years: 10, today: "2026-01-01" });
+checks.push(["projection: lump sum 10y at 10%", flat.final, 1000 * Math.pow(1.1, 10), 1e-6]);
+
+const drip = project({ startValue: 0, monthly: 100, annualReturn: 0.07, years: 10, today: "2026-01-01" });
+const i = Math.pow(1.07, 1 / 12) - 1;
+// deposits land at the start of each month, so this is an annuity-due
+const annuity = 100 * ((Math.pow(1 + i, 120) - 1) / i) * (1 + i);
+checks.push(["projection: 100/mo for 10y at 7%", drip.final, annuity, 1e-6]);
+
+const drained = project({ startValue: 5000, monthly: -1000, annualReturn: 0, years: 10, today: "2026-01-01" });
+checks.push(["projection: withdrawal depletes", drained.final, 0, 1e-9]);
+checks.push(["projection: depletion year reported", drained.depletedYear ? 1 : 0, 1, 0]);
+
+const dd = drawdownImpact(1000, -0.2, 0.08);
+checks.push(["drawdown: recovery years at 8%", dd.recoveryYears, Math.log(1.25) / Math.log(1.08), 1e-9]);
+checks.push(["drawdown: balance after -20%", dd.after, 800, 1e-9]);
 
 let failures = 0;
 for (const [name, got, want, tol] of checks) {

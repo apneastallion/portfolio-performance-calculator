@@ -15,10 +15,14 @@
 export type Rebalance = "none" | "annual";
 
 export interface Panel {
-  /** ISO dates, ascending, one per trading session. */
+  /** ISO dates, ascending: the union of every symbol's sessions in the window. */
   dates: string[];
-  /** symbol -> price on each date in `dates` (aligned, no gaps). */
-  prices: Record<string, number[]>;
+  /**
+   * symbol -> price on each date in `dates`, aligned with `dates`. `null` before the
+   * symbol's first available session, so a fund that listed years later can join a
+   * running portfolio instead of truncating everyone else's history.
+   */
+  prices: Record<string, (number | null)[]>;
 }
 
 export interface RunInput {
@@ -115,6 +119,28 @@ export function runPortfolio(input: RunInput): Run {
   const cost = costBps / 10_000;
   const n = panel.dates.length;
   const px = symbols.map((s) => panel.prices[s]);
+  const priceAt = (k: number, i: number): number | null => px[k]?.[i] ?? null;
+
+  /** Sessions where a symbol has no price yet (it had not listed). */
+  const liveAt = (i: number): number[] => {
+    const out: number[] = [];
+    for (let k = 0; k < symbols.length; k += 1) {
+      if (priceAt(k, i) != null) out.push(k);
+    }
+    return out;
+  };
+
+  /**
+   * Target mix over the symbols that exist on this session, renormalised so a late
+   * listing does not leave part of a deposit in cash and an early portfolio does not
+   * pretend to hold a fund that did not exist.
+   */
+  const mixAt = (i: number): { k: number; w: number }[] => {
+    const ks = liveAt(i);
+    const sum = ks.reduce((a, k) => a + weights[k], 0);
+    if (sum <= 0) return ks.map((k) => ({ k, w: 1 / ks.length }));
+    return ks.map((k) => ({ k, w: weights[k] / sum }));
+  };
 
   const units: Record<string, number> = Object.fromEntries(symbols.map((s) => [s, 0]));
   let cash = 0;
@@ -131,7 +157,11 @@ export function runPortfolio(input: RunInput): Run {
   let depletedAt: string | undefined;
 
   const valueAt = (i: number) =>
-    cash + symbols.reduce((sum, s, k) => sum + units[s] * px[k][i], 0);
+    cash +
+    symbols.reduce((sum, s, k) => {
+      const p = priceAt(k, i);
+      return p == null ? sum : sum + units[s] * p;
+    }, 0);
 
   for (let i = 0; i < n; i += 1) {
     let flow = 0;
@@ -144,9 +174,9 @@ export function runPortfolio(input: RunInput): Run {
       const net = flow / (1 + cost);
       totalUnits += net / navPre;
       cash += flow;
-      symbols.forEach((s, k) => {
-        const notional = (flow * weights[k]) / (1 + cost);
-        units[s] += notional / px[k][i];
+      mixAt(i).forEach(({ k, w }) => {
+        const notional = (flow * w) / (1 + cost);
+        units[symbols[k]] += notional / (priceAt(k, i) as number);
         cash -= notional * (1 + cost);
         totalCost += notional * cost;
       });
@@ -161,8 +191,10 @@ export function runPortfolio(input: RunInput): Run {
         const notional = wanted / (1 - cost);
         const scale = Math.min(1, notional / available);
         symbols.forEach((s, k) => {
-          const sold = units[s] * px[k][i] * scale;
-          units[s] -= sold / px[k][i];
+          const p = priceAt(k, i);
+          if (p == null || units[s] === 0) return;
+          const sold = units[s] * p * scale;
+          units[s] -= sold / p;
           totalCost += sold * cost;
         });
         // redeem the same fraction of units as of value, so the NAV is unchanged by
@@ -184,25 +216,30 @@ export function runPortfolio(input: RunInput): Run {
     }
 
     if (rebal.has(i) && totalUnits > 0) {
-      const values = symbols.map((s, k) => units[s] * px[k][i]);
-      const total = values.reduce((a, b) => a + b, 0);
-      // solve the scale that leaves enough behind to pay for the trades it causes
-      let scale = total;
-      for (let it = 0; it < 60; it += 1) {
-        const target = weights.map((w) => w * scale);
-        const traded = target.reduce((acc, t, k) => acc + Math.abs(t - values[k]), 0);
-        const next = total - traded * cost;
-        if (Math.abs(next - scale) < 1e-10) {
+      const mix = mixAt(i);
+      if (mix.length) {
+        const values = mix.map(({ k }) => units[symbols[k]] * (priceAt(k, i) as number));
+        const total = values.reduce((a, b) => a + b, 0);
+        // solve the scale that leaves enough behind to pay for the trades it causes
+        let scale = total;
+        for (let it = 0; it < 60; it += 1) {
+          const traded = mix.reduce(
+            (acc, { w }, j) => acc + Math.abs(w * scale - values[j]),
+            0,
+          );
+          const next = total - traded * cost;
+          if (Math.abs(next - scale) < 1e-10) {
+            scale = next;
+            break;
+          }
           scale = next;
-          break;
         }
-        scale = next;
+        mix.forEach(({ k, w }, j) => {
+          const delta = w * scale - values[j];
+          units[symbols[k]] += delta / (priceAt(k, i) as number);
+          totalCost += Math.abs(delta) * cost;
+        });
       }
-      symbols.forEach((s, k) => {
-        const delta = weights[k] * scale - values[k];
-        units[s] += delta / px[k][i];
-        totalCost += Math.abs(delta) * cost;
-      });
     }
 
     const v = valueAt(i);
@@ -216,7 +253,8 @@ export function runPortfolio(input: RunInput): Run {
   const totalEnd = valueAt(last);
   const finalWeights: Record<string, number> = {};
   symbols.forEach((s, k) => {
-    finalWeights[s] = totalEnd > 0 ? (units[s] * px[k][last]) / totalEnd : 0;
+    const p = priceAt(k, last);
+    finalWeights[s] = p != null && totalEnd > 0 ? (units[s] * p) / totalEnd : 0;
   });
 
   return { equity, nav, flows, costs, units, finalWeights, depletedAt };
